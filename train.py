@@ -1,19 +1,18 @@
-import random
-import json
-from transformers import AutoTokenizer
-import torch
-from torch.utils.data import Subset, DataLoader
-from torch.optim import Adam
-import torch.nn as nn
-import os
-import datasets
-from tqdm import tqdm
 import argparse
-import wandb
+import json
+import os
+import random
 
-from eval import evaluate
+import datasets
+import torch
+import wandb
+from torch.optim import Adam
+from torch.utils.data import DataLoader
+from tqdm import tqdm
+from transformers import AutoTokenizer
 
 import utils
+from eval import evaluate
 
 
 def parse():
@@ -32,6 +31,7 @@ def parse():
     parser.add_argument('--graph', type=str, default='GAT')
     parser.add_argument('--low-res', default=False, action='store_true')
     parser.add_argument('--seed', default=3, type=int)
+    parser.add_argument("--n-soft-token", type=int, default=100)
     return parser
 
 
@@ -107,11 +107,16 @@ if __name__ == '__main__':
                                                         'dev': 'data/{}/{}_dev.json'.format(args.data, args.data),
                                                         'test': 'data/{}/{}_test.json'.format(args.data, args.data), })
 
+            # 加在 input_id 后面，[V_i][Pred_i]...[SEP]
             prefix = []
             for i in range(max_depth):
                 prefix.append(tokenizer.vocab_size + num_class + i)
                 prefix.append(tokenizer.vocab_size + num_class + max_depth)
             prefix.append(tokenizer.sep_token_id)
+
+            # todo: soft prompt tokens 占位
+            n_soft_tokens: int = args.n_soft_token
+            soft_token_prefix = torch.full((1, n_soft_tokens), 1)
 
 
             def data_map_function(batch, tokenizer):
@@ -127,9 +132,23 @@ if __name__ == '__main__':
                     new_batch['labels'][-1] = [x for y in new_batch['labels'][-1] for x in y]
 
                     tokens = tokenizer(t, truncation=True)
-                    new_batch['input_ids'].append(tokens['input_ids'][:-1][:512 - len(prefix)] + prefix)
-                    new_batch['input_ids'][-1].extend(
-                        [tokenizer.pad_token_id] * (512 - len(new_batch['input_ids'][-1])))
+
+                    # 去掉最后一个是 [SEP] 吧
+                    # new_batch['input_ids'].append(tokens['input_ids'][:-1][:512 - len(prefix)] + prefix)
+
+                    # soft prompt tokens + tokens from corpus + postfix ( [V_i][Pred_i]...[SEP] )
+                    input_ids_with_prompt = soft_token_prefix \
+                                            + tokens['input_ids'][:-1][:512 - len(soft_token_prefix) - len(prefix)] \
+                                            + prefix
+                    # 填充到 512
+                    input_ids_with_prompt.extend(
+                        [tokenizer.pad_token_id] * (512 - len(new_batch['input_ids'][-1]))
+                    )
+
+                    new_batch['input_ids'].append(
+                        input_ids_with_prompt
+                    )
+
                     new_batch['attention_mask'].append(
                         tokens['attention_mask'][:-1][:512 - len(prefix)] + [1] * len(prefix))
                     new_batch['attention_mask'][-1].extend([0] * (512 - len(new_batch['attention_mask'][-1])))
@@ -157,7 +176,7 @@ if __name__ == '__main__':
             json.dump(index, open(os.path.join(data_path, 'low.json'), 'w'))
         dataset['train'] = dataset['train'].select(index[len(index) // 5:len(index) // 10 * 3])
     model = Prompt.from_pretrained(args.arch, num_labels=len(label_dict), path_list=path_list, layer=args.layer,
-                                   graph_type=args.graph, data_path=data_path, depth2label=depth2label,)
+                                   graph_type=args.graph, data_path=data_path, depth2label=depth2label, )
     model.init_embedding()
 
     model.to('cuda')

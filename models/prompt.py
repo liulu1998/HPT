@@ -1,19 +1,18 @@
-from transformers.models.bert.modeling_bert import BertModel, BertPreTrainedModel, BertOnlyMLMHead
+import math
+import os
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.nn import CrossEntropyLoss
+from transformers import AutoTokenizer
 from transformers.modeling_outputs import (
     MaskedLMOutput
 )
-from transformers.activations import ACT2FN
-from torch.nn import CrossEntropyLoss, MSELoss
-import torch.nn as nn
-import torch
-from transformers import AutoTokenizer
-import os
-from .loss import multilabel_categorical_crossentropy
+from transformers.models.bert.modeling_bert import BertModel, BertPreTrainedModel, BertOnlyMLMHead
+
 from .graph import GraphEncoder
-from .attention import CrossAttention
-import math
-import torch.nn.functional as F
-from sklearn.metrics import f1_score
+from .loss import multilabel_categorical_crossentropy
 
 
 class GraphEmbedding(nn.Module):
@@ -71,6 +70,53 @@ class OutputEmbedding(nn.Module):
         return F.linear(x, self.weight(), self.bias)
 
 
+class SoftEmbedding(nn.Module):
+    def __init__(self,
+                 wte: nn.Embedding,
+                 n_tokens: int = 10,
+                 random_range: float = 0.5,
+                 initialize_from_vocab: bool = True):
+        """appends learned embedding to
+        Args:
+            wte (nn.Embedding): original transformer word embedding
+            n_tokens (int, optional): number of tokens for task. Defaults to 10.
+            random_range (float, optional): range to init embedding (if not initialize from vocab). Defaults to 0.5.
+            initialize_from_vocab (bool, optional): initializes from default vocab. Defaults to True.
+        """
+        super(SoftEmbedding, self).__init__()
+        self.wte = wte
+        self.n_tokens = n_tokens
+        self.learned_embedding = nn.parameter.Parameter(
+            self.initialize_embedding(wte, n_tokens, random_range, initialize_from_vocab)
+        )
+
+    def initialize_embedding(self,
+                             wte: nn.Embedding,
+                             n_tokens: int = 10,
+                             random_range: float = 0.5,
+                             initialize_from_vocab: bool = True):
+        """initializes learned embedding
+        Args:
+            same as __init__
+        Returns:
+            torch.float: initialized using original schemes
+        """
+        if initialize_from_vocab:
+            return self.wte.weight[:n_tokens].clone().detach()
+        return torch.FloatTensor(n_tokens, wte.weight.size(1)).uniform_(-random_range, random_range)
+
+    def forward(self, tokens):
+        """run forward pass
+        Args:
+            tokens (torch.long): input tokens before encoding
+        Returns:
+            torch.float: encoding of text concatenated with learned task specifc embedding
+        """
+        input_embedding = self.wte(tokens[:, self.n_tokens:])
+        learned_embedding = self.learned_embedding.repeat(input_embedding.size(0), 1, 1)
+        return torch.cat([learned_embedding, input_embedding], 1)
+
+
 class Prompt(BertPreTrainedModel):
     _keys_to_ignore_on_load_unexpected = [r"pooler"]
     _keys_to_ignore_on_load_missing = [r"position_ids", r"predictions.decoder.bias"]
@@ -79,8 +125,28 @@ class Prompt(BertPreTrainedModel):
         super().__init__(config)
 
         self.bert = BertModel(config, add_pooling_layer=False)
+
+        # 冻结 BERT 参数
+        for name, param in self.bert.named_parameters():
+            param.requires_grad = False
+
+        # parameters = list(self.bert.parameters())
+        # # ? 为何忽略第一个参数 ?
+        # for x in parameters[1:]:
+        #     x.requires_grad = False
+
         self.tokenizer = AutoTokenizer.from_pretrained(self.name_or_path)
         self.cls = BertOnlyMLMHead(config)
+
+        # soft prompt embedding
+        self.soft_prompt_emb = SoftEmbedding(
+            wte=self.bert.get_input_embeddings(),
+            n_tokens=50,
+            # 随机初始化
+            initialize_from_vocab=False
+        )
+        self.bert.set_input_embeddings(self.soft_prompt_emb)
+
         self.num_labels = config.num_labels
         self.multiclass_bias = nn.Parameter(torch.zeros(self.num_labels, dtype=torch.float32))
         bound = 1 / math.sqrt(768)
