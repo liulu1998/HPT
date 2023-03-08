@@ -26,7 +26,9 @@ def parse():
     parser.add_argument('--update', type=int, default=1)
     parser.add_argument('--model', type=str, default='prompt')
     parser.add_argument('--wandb', default=False, action='store_true')
-    parser.add_argument('--arch', type=str, default='bert-base-uncased')
+    # parser.add_argument('--arch', type=str, default='bert-base-uncased')
+    # 中文 BERT
+    parser.add_argument('--arch', type=str, default='hfl/chinese-bert-wwm-ext')
     parser.add_argument('--layer', type=int, default=1)
     parser.add_argument('--graph', type=str, default='GAT')
     parser.add_argument('--low-res', default=False, action='store_true')

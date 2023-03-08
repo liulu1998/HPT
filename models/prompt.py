@@ -118,6 +118,10 @@ class SoftEmbedding(nn.Module):
 
 
 class Prompt(BertPreTrainedModel):
+    # ! 下方 demo 展示了 Soft Prompt tuning
+    # https://github.com/qhduan/mt5-soft-prompt-tuning/blob/main/mt5_soft_prompt_tuning_large.ipynb
+    # 冻结了 BERT 的参数，只训练 Prompt 的参数 (Soft Prompt Embedding)
+
     _keys_to_ignore_on_load_unexpected = [r"pooler"]
     _keys_to_ignore_on_load_missing = [r"position_ids", r"predictions.decoder.bias"]
 
@@ -233,7 +237,13 @@ class Prompt(BertPreTrainedModel):
 
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
         multiclass_pos = input_ids == (self.get_input_embeddings().size - 1)
+
+        # ! 即，不打算预测的，「label设置为 - 100」。一般只设置[MASK]
+        # ! 位置对应的label，其它位置设置成 -100。这样只计算了[MASK]
+        # ! 待预测位置的 token 对应的 loss
         single_labels = input_ids.masked_fill(multiclass_pos | (input_ids == self.config.pad_token_id), -100)
+
+        # ! 文章依然保留了 MLM 任务，即：随机 mask 掉一部分 token，预测
         if self.training:
             enable_mask = input_ids < self.tokenizer.vocab_size
             random_mask = torch.rand(input_ids.shape, device=input_ids.device) * attention_mask * enable_mask
@@ -265,8 +275,11 @@ class Prompt(BertPreTrainedModel):
 
         if labels is not None:
             loss_fct = CrossEntropyLoss()  # -100 index = padding token
+            # MLM 任务损失
             masked_lm_loss = loss_fct(prediction_scores.view(-1, prediction_scores.size(-1)),
                                       single_labels.view(-1))
+
+            # 论文自定义的损失
             multiclass_logits = prediction_scores.masked_select(
                 multiclass_pos.unsqueeze(-1).expand(-1, -1, prediction_scores.size(-1))).view(-1,
                                                                                               prediction_scores.size(
@@ -279,6 +292,8 @@ class Prompt(BertPreTrainedModel):
         if not return_dict:
             output = (prediction_scores,) + outputs[2:]
             return ((masked_lm_loss,) + output) if masked_lm_loss is not None else output
+
+        # 结果包装一下，非运算
         ret = MaskedLMOutput(
             loss=masked_lm_loss,
             logits=prediction_scores,
