@@ -14,6 +14,8 @@ from transformers import AutoTokenizer
 import utils
 from eval import evaluate
 
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+
 
 def parse():
     parser = argparse.ArgumentParser()
@@ -54,6 +56,9 @@ class Save:
 
 
 if __name__ == '__main__':
+    if not os.path.exists("./checkpoints"):
+        os.makedirs("./checkpoints")
+
     parser = parse()
     args = parser.parse_args()
     if args.wandb:
@@ -61,7 +66,7 @@ if __name__ == '__main__':
     print(args)
     utils.seed_torch(args.seed)
 
-    tokenizer = AutoTokenizer.from_pretrained(args.arch)
+    tokenizer = AutoTokenizer.from_pretrained(args.arch, model_max_length=512)
     data_path = os.path.join('data', args.data)
     args.name = args.data + '-' + args.name
     batch_size = args.batch
@@ -94,11 +99,16 @@ if __name__ == '__main__':
 
     depth_dict = {i: get_depth(i) for i in range(num_class)}
     max_depth = depth_dict[max(depth_dict, key=depth_dict.get)] + 1
-    depth2label = {i: [a for a in depth_dict if depth_dict[a] == i] for i in range(max_depth)}
+    depth2label = {
+        i: [a for a in depth_dict if depth_dict[a] == i]
+        for i in range(max_depth)
+    }
 
     for depth in depth2label:
         for l in depth2label[depth]:
             path_list.append((num_class + depth, l))
+
+    n_soft_tokens: int = args.n_soft_token
 
     if args.model == 'prompt':
         if os.path.exists(os.path.join(data_path, args.model)):
@@ -117,8 +127,8 @@ if __name__ == '__main__':
             prefix.append(tokenizer.sep_token_id)
 
             # todo: soft prompt tokens 占位
-            n_soft_tokens: int = args.n_soft_token
-            soft_token_prefix = torch.full((1, n_soft_tokens), 1)
+            # soft_token_prefix = list(torch.full((1, n_soft_tokens), 1))
+            soft_token_prefix = [1] * n_soft_tokens
 
 
             def data_map_function(batch, tokenizer):
@@ -140,11 +150,11 @@ if __name__ == '__main__':
 
                     # soft prompt tokens + tokens from corpus + postfix ( [V_i][Pred_i]...[SEP] )
                     input_ids_with_prompt = soft_token_prefix \
-                                            + tokens['input_ids'][:-1][:512 - len(soft_token_prefix) - len(prefix)] \
+                                            + tokens['input_ids'][:-1][:512 - n_soft_tokens - len(prefix)] \
                                             + prefix
                     # 填充到 512
                     input_ids_with_prompt.extend(
-                        [tokenizer.pad_token_id] * (512 - len(new_batch['input_ids'][-1]))
+                        [tokenizer.pad_token_id] * (512 - len(input_ids_with_prompt))
                     )
 
                     new_batch['input_ids'].append(
@@ -177,8 +187,10 @@ if __name__ == '__main__':
             random.shuffle(index)
             json.dump(index, open(os.path.join(data_path, 'low.json'), 'w'))
         dataset['train'] = dataset['train'].select(index[len(index) // 5:len(index) // 10 * 3])
+
     model = Prompt.from_pretrained(args.arch, num_labels=len(label_dict), path_list=path_list, layer=args.layer,
-                                   graph_type=args.graph, data_path=data_path, depth2label=depth2label, )
+                                   graph_type=args.graph, data_path=data_path, depth2label=depth2label,
+                                   n_soft_tokens=n_soft_tokens)
     model.init_embedding()
 
     model.to('cuda')
